@@ -43,6 +43,7 @@
 #include "qapi/qapi-visit-block-core.h"
 #include "crypto.h"
 #include "block/aio_task.h"
+#include "block/dirty-bitmap.h"
 
 /*
   Differences with QCOW:
@@ -1616,9 +1617,9 @@ static int coroutine_fn qcow2_do_open(BlockDriverState *bs, QDict *options,
 
     if (open_data_file) {
         /* Open external data file */
-        s->data_file = bdrv_open_child(NULL, options, "data-file", bs,
-                                       &child_of_bds, BDRV_CHILD_DATA,
-                                       true, errp);
+        s->data_file = bdrv_co_open_child(NULL, options, "data-file", bs,
+                                          &child_of_bds, BDRV_CHILD_DATA,
+                                          true, errp);
         if (*errp) {
             ret = -EINVAL;
             goto fail;
@@ -1626,9 +1627,10 @@ static int coroutine_fn qcow2_do_open(BlockDriverState *bs, QDict *options,
 
         if (s->incompatible_features & QCOW2_INCOMPAT_DATA_FILE) {
             if (!s->data_file && s->image_data_file) {
-                s->data_file = bdrv_open_child(s->image_data_file, options,
-                                               "data-file", bs, &child_of_bds,
-                                               BDRV_CHILD_DATA, false, errp);
+                s->data_file = bdrv_co_open_child(s->image_data_file, options,
+                                                  "data-file", bs,
+                                                  &child_of_bds,
+                                                  BDRV_CHILD_DATA, false, errp);
                 if (!s->data_file) {
                     ret = -EINVAL;
                     goto fail;
@@ -3453,7 +3455,7 @@ qcow2_co_create(BlockdevCreateOptions *create_options, Error **errp)
     assert(create_options->driver == BLOCKDEV_DRIVER_QCOW2);
     qcow2_opts = &create_options->u.qcow2;
 
-    bs = bdrv_open_blockdev_ref(qcow2_opts->file, errp);
+    bs = bdrv_co_open_blockdev_ref(qcow2_opts->file, errp);
     if (bs == NULL) {
         return -EIO;
     }
@@ -3508,7 +3510,7 @@ qcow2_co_create(BlockdevCreateOptions *create_options, Error **errp)
     if (!qcow2_opts->has_preallocation) {
         qcow2_opts->preallocation = PREALLOC_MODE_OFF;
     }
-    if (qcow2_opts->has_backing_file &&
+    if (qcow2_opts->backing_file &&
         qcow2_opts->preallocation != PREALLOC_MODE_OFF &&
         !qcow2_opts->extended_l2)
     {
@@ -3517,7 +3519,7 @@ qcow2_co_create(BlockdevCreateOptions *create_options, Error **errp)
         ret = -EINVAL;
         goto out;
     }
-    if (qcow2_opts->has_backing_fmt && !qcow2_opts->has_backing_file) {
+    if (qcow2_opts->has_backing_fmt && !qcow2_opts->backing_file) {
         error_setg(errp, "Backing format cannot be used without backing file");
         ret = -EINVAL;
         goto out;
@@ -3558,7 +3560,7 @@ qcow2_co_create(BlockdevCreateOptions *create_options, Error **errp)
         ret = -EINVAL;
         goto out;
     }
-    if (qcow2_opts->data_file_raw && qcow2_opts->has_backing_file) {
+    if (qcow2_opts->data_file_raw && qcow2_opts->backing_file) {
         error_setg(errp, "Backing file and data-file-raw cannot be used at "
                    "the same time");
         ret = -EINVAL;
@@ -3584,7 +3586,7 @@ qcow2_co_create(BlockdevCreateOptions *create_options, Error **errp)
          * backing file when specifying data_file_raw is an error
          * anyway.
          */
-        assert(!qcow2_opts->has_backing_file);
+        assert(!qcow2_opts->backing_file);
     }
 
     if (qcow2_opts->data_file) {
@@ -3595,7 +3597,7 @@ qcow2_co_create(BlockdevCreateOptions *create_options, Error **errp)
             ret = -EINVAL;
             goto out;
         }
-        data_bs = bdrv_open_blockdev_ref(qcow2_opts->data_file, errp);
+        data_bs = bdrv_co_open_blockdev_ref(qcow2_opts->data_file, errp);
         if (data_bs == NULL) {
             ret = -EIO;
             goto out;
@@ -3628,8 +3630,8 @@ qcow2_co_create(BlockdevCreateOptions *create_options, Error **errp)
     }
 
     /* Create BlockBackend to write to the image */
-    blk = blk_new_with_bs(bs, BLK_PERM_WRITE | BLK_PERM_RESIZE, BLK_PERM_ALL,
-                          errp);
+    blk = blk_co_new_with_bs(bs, BLK_PERM_WRITE | BLK_PERM_RESIZE, BLK_PERM_ALL,
+                             errp);
     if (!blk) {
         ret = -EPERM;
         goto out;
@@ -3711,9 +3713,9 @@ qcow2_co_create(BlockdevCreateOptions *create_options, Error **errp)
     if (data_bs) {
         qdict_put_str(options, "data-file", data_bs->node_name);
     }
-    blk = blk_new_open(NULL, NULL, options,
-                       BDRV_O_RDWR | BDRV_O_RESIZE | BDRV_O_NO_FLUSH,
-                       errp);
+    blk = blk_co_new_open(NULL, NULL, options,
+                          BDRV_O_RDWR | BDRV_O_RESIZE | BDRV_O_NO_FLUSH,
+                          errp);
     if (blk == NULL) {
         ret = -EIO;
         goto out;
@@ -3752,7 +3754,7 @@ qcow2_co_create(BlockdevCreateOptions *create_options, Error **errp)
     }
 
     /* Want a backing file? There you go. */
-    if (qcow2_opts->has_backing_file) {
+    if (qcow2_opts->backing_file) {
         const char *backing_format = NULL;
 
         if (qcow2_opts->has_backing_fmt) {
@@ -3770,7 +3772,7 @@ qcow2_co_create(BlockdevCreateOptions *create_options, Error **errp)
     }
 
     /* Want encryption? There you go. */
-    if (qcow2_opts->has_encrypt) {
+    if (qcow2_opts->encrypt) {
         ret = qcow2_set_up_encryption(blk_bs(blk), qcow2_opts->encrypt, errp);
         if (ret < 0) {
             goto out;
@@ -3792,9 +3794,9 @@ qcow2_co_create(BlockdevCreateOptions *create_options, Error **errp)
     if (data_bs) {
         qdict_put_str(options, "data-file", data_bs->node_name);
     }
-    blk = blk_new_open(NULL, NULL, options,
-                       BDRV_O_RDWR | BDRV_O_NO_BACKING | BDRV_O_NO_IO,
-                       errp);
+    blk = blk_co_new_open(NULL, NULL, options,
+                          BDRV_O_RDWR | BDRV_O_NO_BACKING | BDRV_O_NO_IO,
+                          errp);
     if (blk == NULL) {
         ret = -EIO;
         goto out;
@@ -3871,13 +3873,13 @@ static int coroutine_fn qcow2_co_create_opts(BlockDriver *drv,
     }
 
     /* Create and open the file (protocol layer) */
-    ret = bdrv_create_file(filename, opts, errp);
+    ret = bdrv_co_create_file(filename, opts, errp);
     if (ret < 0) {
         goto finish;
     }
 
-    bs = bdrv_open(filename, NULL, NULL,
-                   BDRV_O_RDWR | BDRV_O_RESIZE | BDRV_O_PROTOCOL, errp);
+    bs = bdrv_co_open(filename, NULL, NULL,
+                      BDRV_O_RDWR | BDRV_O_RESIZE | BDRV_O_PROTOCOL, errp);
     if (bs == NULL) {
         ret = -EIO;
         goto finish;
@@ -3886,14 +3888,14 @@ static int coroutine_fn qcow2_co_create_opts(BlockDriver *drv,
     /* Create and open an external data file (protocol layer) */
     val = qdict_get_try_str(qdict, BLOCK_OPT_DATA_FILE);
     if (val) {
-        ret = bdrv_create_file(val, opts, errp);
+        ret = bdrv_co_create_file(val, opts, errp);
         if (ret < 0) {
             goto finish;
         }
 
-        data_bs = bdrv_open(val, NULL, NULL,
-                            BDRV_O_RDWR | BDRV_O_RESIZE | BDRV_O_PROTOCOL,
-                            errp);
+        data_bs = bdrv_co_open(val, NULL, NULL,
+                               BDRV_O_RDWR | BDRV_O_RESIZE | BDRV_O_PROTOCOL,
+                               errp);
         if (data_bs == NULL) {
             ret = -EIO;
             goto finish;
@@ -5142,7 +5144,8 @@ err:
     return NULL;
 }
 
-static int qcow2_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
+static int coroutine_fn
+qcow2_co_get_info(BlockDriverState *bs, BlockDriverInfo *bdi)
 {
     BDRVQcow2State *s = bs->opaque;
     bdi->cluster_size = s->cluster_size;
@@ -5195,7 +5198,6 @@ static ImageInfoSpecific *qcow2_get_specific_info(BlockDriverState *bs,
             .refcount_bits      = s->refcount_bits,
             .has_bitmaps        = !!bitmaps,
             .bitmaps            = bitmaps,
-            .has_data_file      = !!s->image_data_file,
             .data_file          = g_strdup(s->image_data_file),
             .has_data_file_raw  = has_data_file(bs),
             .data_file_raw      = data_file_is_raw(bs),
@@ -5226,7 +5228,6 @@ static ImageInfoSpecific *qcow2_get_specific_info(BlockDriverState *bs,
         memset(&encrypt_info->u, 0, sizeof(encrypt_info->u));
         qapi_free_QCryptoBlockInfo(encrypt_info);
 
-        spec_info->u.qcow2.data->has_encrypt = true;
         spec_info->u.qcow2.data->encrypt = qencrypt;
     }
 
@@ -5287,8 +5288,8 @@ static int64_t qcow2_check_vmstate_request(BlockDriverState *bs,
     return pos;
 }
 
-static coroutine_fn int qcow2_save_vmstate(BlockDriverState *bs,
-                                           QEMUIOVector *qiov, int64_t pos)
+static coroutine_fn int qcow2_co_save_vmstate(BlockDriverState *bs,
+                                              QEMUIOVector *qiov, int64_t pos)
 {
     int64_t offset = qcow2_check_vmstate_request(bs, qiov, pos);
     if (offset < 0) {
@@ -5299,8 +5300,8 @@ static coroutine_fn int qcow2_save_vmstate(BlockDriverState *bs,
     return bs->drv->bdrv_co_pwritev_part(bs, offset, qiov->size, qiov, 0, 0);
 }
 
-static coroutine_fn int qcow2_load_vmstate(BlockDriverState *bs,
-                                           QEMUIOVector *qiov, int64_t pos)
+static coroutine_fn int qcow2_co_load_vmstate(BlockDriverState *bs,
+                                              QEMUIOVector *qiov, int64_t pos)
 {
     int64_t offset = qcow2_check_vmstate_request(bs, qiov, pos);
     if (offset < 0) {
@@ -5846,7 +5847,7 @@ static int coroutine_fn qcow2_co_amend(BlockDriverState *bs,
     BDRVQcow2State *s = bs->opaque;
     int ret = 0;
 
-    if (qopts->has_encrypt) {
+    if (qopts->encrypt) {
         if (!s->crypto) {
             error_setg(errp, "image is not encrypted, can't amend");
             return -EOPNOTSUPP;
@@ -5911,7 +5912,7 @@ void qcow2_signal_corruption(BlockDriverState *bs, bool fatal, int64_t offset,
 
     node_name = bdrv_get_node_name(bs);
     qapi_event_send_block_image_corrupted(bdrv_get_device_name(bs),
-                                          *node_name != '\0', node_name,
+                                          *node_name ? node_name : NULL,
                                           message, offset >= 0, offset,
                                           size >= 0, size,
                                           fatal);
@@ -6078,11 +6079,11 @@ BlockDriver bdrv_qcow2 = {
     .bdrv_snapshot_list     = qcow2_snapshot_list,
     .bdrv_snapshot_load_tmp = qcow2_snapshot_load_tmp,
     .bdrv_measure           = qcow2_measure,
-    .bdrv_get_info          = qcow2_get_info,
+    .bdrv_co_get_info       = qcow2_co_get_info,
     .bdrv_get_specific_info = qcow2_get_specific_info,
 
-    .bdrv_save_vmstate    = qcow2_save_vmstate,
-    .bdrv_load_vmstate    = qcow2_load_vmstate,
+    .bdrv_co_save_vmstate   = qcow2_co_save_vmstate,
+    .bdrv_co_load_vmstate   = qcow2_co_load_vmstate,
 
     .is_format                  = true,
     .supports_backing           = true,

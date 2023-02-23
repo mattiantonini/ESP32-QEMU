@@ -487,6 +487,30 @@ static bool pmsav8_needed(void *opaque)
         arm_feature(env, ARM_FEATURE_V8);
 }
 
+static bool pmsav8r_needed(void *opaque)
+{
+    ARMCPU *cpu = opaque;
+    CPUARMState *env = &cpu->env;
+
+    return arm_feature(env, ARM_FEATURE_PMSA) &&
+        arm_feature(env, ARM_FEATURE_V8) &&
+        !arm_feature(env, ARM_FEATURE_M);
+}
+
+static const VMStateDescription vmstate_pmsav8r = {
+    .name = "cpu/pmsav8/pmsav8r",
+    .version_id = 1,
+    .minimum_version_id = 1,
+    .needed = pmsav8r_needed,
+    .fields = (VMStateField[]) {
+        VMSTATE_VARRAY_UINT32(env.pmsav8.hprbar, ARMCPU,
+                        pmsav8r_hdregion, 0, vmstate_info_uint32, uint32_t),
+        VMSTATE_VARRAY_UINT32(env.pmsav8.hprlar, ARMCPU,
+                        pmsav8r_hdregion, 0, vmstate_info_uint32, uint32_t),
+        VMSTATE_END_OF_LIST()
+    },
+};
+
 static const VMStateDescription vmstate_pmsav8 = {
     .name = "cpu/pmsav8",
     .version_id = 1,
@@ -500,6 +524,10 @@ static const VMStateDescription vmstate_pmsav8 = {
         VMSTATE_UINT32(env.pmsav8.mair0[M_REG_NS], ARMCPU),
         VMSTATE_UINT32(env.pmsav8.mair1[M_REG_NS], ARMCPU),
         VMSTATE_END_OF_LIST()
+    },
+    .subsections = (const VMStateDescription * []) {
+        &vmstate_pmsav8r,
+        NULL
     }
 };
 
@@ -811,6 +839,15 @@ static int cpu_post_load(void *opaque, int version_id)
         }
     }
 
+    /*
+     * Misaligned thumb pc is architecturally impossible. Fail the
+     * incoming migration. For TCG it would trigger the assert in
+     * thumb_tr_translate_insn().
+     */
+    if (!is_a64(env) && env->thumb && (env->regs[15] & 1)) {
+        return -1;
+    }
+
     hw_breakpoint_update_all(cpu);
     hw_watchpoint_update_all(cpu);
 
@@ -826,15 +863,6 @@ static int cpu_post_load(void *opaque, int version_id)
                       FPCR_LTPSIZE_SHIFT, FPCR_LTPSIZE_LENGTH) != 4) {
             return -1;
         }
-    }
-
-    /*
-     * Misaligned thumb pc is architecturally impossible.
-     * We have an assert in thumb_tr_translate_insn to verify this.
-     * Fail an incoming migrate to avoid this assert.
-     */
-    if (!is_a64(env) && env->thumb && (env->regs[15] & 1)) {
-        return -1;
     }
 
     if (!kvm_enabled()) {
